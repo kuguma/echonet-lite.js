@@ -19,5 +19,8 @@
     "Smart house",
     "IoT",
     "Home appliances"
-  ]
+  ],
+  "dependencies": {
+    "date-utils": "^1.2.21"
+  }
 }

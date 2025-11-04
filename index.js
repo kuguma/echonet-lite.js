@@ -364,9 +364,18 @@ EL.parseDetail = function( _opc, str ) {
 	let ret = {}; // 戻り値用，連想配列
 	// str = str.toUpperCase();
 
+	let opc = null; // エラーハンドリングのためにスコープを外に出す
+	let array = null;
+
 	try {
-		let array = EL.toHexArray( str );  // edts
-		let opc = EL.toHexArray(_opc)[0];
+		array = EL.toHexArray( str );  // edts
+		opc = EL.toHexArray(_opc)[0];
+
+		// OPCの妥当性チェック: 異常に大きい値を拒否
+		if (opc > 255) {
+			throw new Error('OPC value too large: ' + opc);
+		}
+
 		let epc = array[0]; // 最初は0
 		let pdc = array[1]; // 最初は1
 		let now = 0;  // 入力データの現在処理位置, Index
@@ -375,13 +384,28 @@ EL.parseDetail = function( _opc, str ) {
 
 		// OPCループ
 		for (let i = 0; i < opc; i += 1) {
+			// 配列の境界チェック
+			if (now >= array.length) {
+				throw new Error('Insufficient data: expected more properties at position ' + now);
+			}
+
 			epc = array[now];  // EPC = 機能
 			edt = []; // EDT = データのバイト数
 			now++;
 
+			// 配列の境界チェック
+			if (now >= array.length) {
+				throw new Error('Insufficient data: expected PDC at position ' + now);
+			}
+
 			// PDC（EDTのバイト数）
 			pdc = array[now];
 			now++;
+
+			// PDCの妥当性チェック
+			if (pdc == null || pdc === undefined) {
+				throw new Error('Invalid PDC value at position ' + (now - 1));
+			}
 
 			// それ以外はEDT[0] == byte数
 			// console.log( 'opc count:', i, 'epc:', EL.toHexString(epc), 'pdc:', EL.toHexString(pdc));
@@ -390,6 +414,11 @@ EL.parseDetail = function( _opc, str ) {
 			if (pdc == 0) {
 				ret[EL.toHexString(epc)] = "";
 			} else {
+				// 残りのデータ長チェック
+				if (now + pdc > array.length) {
+					throw new Error('Insufficient data: expected ' + pdc + ' bytes of EDT at position ' + now + ', but only ' + (array.length - now) + ' bytes remaining');
+				}
+
 				// property mapだけEDT[0] != バイト数なので別処理
 				if( epc == 0x9d || epc == 0x9e || epc == 0x9f ) {
 					if( pdc >= 17) { // プロパティの数が16以上の場合（プロパティカウンタ含めてPDC17以上）は format 2
@@ -425,7 +454,9 @@ EL.parseDetail = function( _opc, str ) {
 		}  // opcループ
 
 	} catch (e) {
-		throw new Error('EL.parseDetail(): detail error. opc: ' + opc + ' str: ' + str);
+		let opcStr = (opc !== null && opc !== undefined) ? opc.toString() : 'undefined';
+		let arrayLen = (array !== null && array !== undefined) ? array.length : 0;
+		throw new Error('EL.parseDetail(): detail error. opc: ' + opcStr + ', array length: ' + arrayLen + ', str: ' + str + ' | ' + e.message);
 	}
 
 	return ret;
@@ -452,8 +483,13 @@ EL.parseBytes = function (bytes) {
 		// 文字列にしたので，parseStringで何とかする
 		return (EL.parseString(str));
 	} catch (e) {
-		console.error('EL.parseBytes: ', bytes);
-		throw e;
+		console.error('EL.parseBytes error: ', e.message);
+		if (EL.debugMode) {
+			console.error('EL.parseBytes: ', bytes);
+			console.error('Stack: ', e.stack);
+		}
+		// エラーをユーザー関数に渡すためにnullを返す（例外を再スローしない）
+		return null;
 	}
 };
 
@@ -470,6 +506,17 @@ EL.parseString = function (str) {
 	}
 
 	try {
+		// 基本的なバリデーション
+		if (str.length < 28) {  // 最小パケット長（EHD+TID+SEOJ+DEOJ+ESV+OPC = 14バイト = 28文字）
+			throw new Error('Packet too short: expected at least 28 characters, got ' + str.length);
+		}
+
+		let ehd = str.substr(0, 4);
+		// 正常なヘッダーチェック（警告のみ、処理は続行）
+		if (ehd != '1081') {
+			console.warn('EL.parseString: Unexpected EHD header: ' + ehd + ' (expected 1081). Packet may be malformed.');
+		}
+
 		eldata = {
 			'EHD': str.substr(0, 4),
 			'TID': str.substr(4, 4),
@@ -482,7 +529,10 @@ EL.parseString = function (str) {
 			'DETAILs': EL.parseDetail(str.substr(22, 2), str.substr(24))
 		};
 	} catch (e) {
-		console.error(str);
+		console.error('EL.parseString error: ', e.message);
+		if (EL.debugMode) {
+			console.error('EL.parseString input: ', str);
+		}
 		throw e;
 	}
 
