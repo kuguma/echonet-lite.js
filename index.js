@@ -363,21 +363,41 @@ EL.parseDetail = function( _opc, str ) {
 	// console.log('EL.parseDetail() opc:', _opc, 'str:', str);
 	let ret = {}; // 戻り値用，連想配列
 	// str = str.toUpperCase();
+	let opc = 0;  // opcをtryブロックの外で定義（catchブロックで参照するため）
+	let dataCorrupted = false;  // データ破損フラグ
 
 	try {
 		let array = EL.toHexArray( str );  // edts
-		let opc = EL.toHexArray(_opc)[0];
-		let epc = array[0]; // 最初は0
-		let pdc = array[1]; // 最初は1
+		opc = EL.toHexArray(_opc)[0];
+		let epc = 0;
+		let pdc = 0;
 		let now = 0;  // 入力データの現在処理位置, Index
 		let edt = [];  // 各edtをここに集めて，retに集約
 
-
 		// OPCループ
 		for (let i = 0; i < opc; i += 1) {
+			// 配列の範囲チェック: EPCを読む前に十分なデータがあるか確認
+			if (now >= array.length) {
+				if (EL.debugMode) {
+					console.log('EL.parseDetail: Insufficient data. Expected ' + opc + ' properties, but only ' + i + ' available.');
+				}
+				// 不正なOPCまたはデータ不足なので、データ破損とみなす
+				dataCorrupted = true;
+				break;
+			}
+
 			epc = array[now];  // EPC = 機能
 			edt = []; // EDT = データのバイト数
 			now++;
+
+			// 配列の範囲チェック: PDCを読む前に十分なデータがあるか確認
+			if (now >= array.length) {
+				if (EL.debugMode) {
+					console.log('EL.parseDetail: Insufficient data for PDC at property ' + i);
+				}
+				dataCorrupted = true;
+				break;
+			}
 
 			// PDC（EDTのバイト数）
 			pdc = array[now];
@@ -390,6 +410,16 @@ EL.parseDetail = function( _opc, str ) {
 			if (pdc == 0) {
 				ret[EL.toHexString(epc)] = "";
 			} else {
+				// 配列の範囲チェック: PDC分のデータがあるか確認
+				if (now + pdc > array.length) {
+					if (EL.debugMode) {
+						console.log('EL.parseDetail: Insufficient data for EDT. PDC=' + pdc + ', available=' + (array.length - now));
+					}
+					// PDCが示すデータ量が実際のデータより多い場合は、この時点で終了
+					dataCorrupted = true;
+					break;
+				}
+
 				// property mapだけEDT[0] != バイト数なので別処理
 				if( epc == 0x9d || epc == 0x9e || epc == 0x9f ) {
 					if( pdc >= 17) { // プロパティの数が16以上の場合（プロパティカウンタ含めてPDC17以上）は format 2
@@ -424,8 +454,21 @@ EL.parseDetail = function( _opc, str ) {
 			}
 		}  // opcループ
 
+		// データ破損が検出された場合はnullを返す
+		if (dataCorrupted) {
+			if (EL.debugMode) {
+				console.log('EL.parseDetail: Data corruption detected. OPC=' + opc + ', but insufficient data.');
+			}
+			return null;
+		}
+
 	} catch (e) {
-		throw new Error('EL.parseDetail(): detail error. opc: ' + opc + ' str: ' + str);
+		if (EL.debugMode) {
+			console.error('EL.parseDetail(): detail error. opc: ' + opc + ' str: ' + str);
+			console.error(e);
+		}
+		// 例外を投げずにnullを返す
+		return null;
 	}
 
 	return ret;
@@ -435,12 +478,37 @@ EL.parseDetail = function( _opc, str ) {
 // バイトデータをいれるとELDATA形式にする
 EL.parseBytes = function (bytes) {
 	try {
-		// 最低限のELパケットになってない
-		if (bytes.length < 14) {
-			console.error("## EL.parseBytes error. bytes is less then 14 bytes. bytes.length is " + bytes.length);
-			console.error(bytes);
+		// 最低限のヘッダー（EHD1 + EHD2 = 2バイト）がない場合は拒否
+		if (bytes.length < 2) {
+			if (EL.debugMode) {
+				console.error("## EL.parseBytes error. bytes is less than 2 bytes. bytes.length is " + bytes.length);
+				console.error(bytes);
+			}
 			return null;
 		}
+
+		// EHD1とEHD2を確認して、フォーマット1の場合は14バイト以上必要
+		// フォーマット2（0x1082）の場合は最小4バイト（EHD + 任意データ最低2バイト）
+		if (bytes[0] === 0x10 && bytes[1] === 0x81) {
+			// フォーマット1: 最小14バイト必要
+			if (bytes.length < 14) {
+				if (EL.debugMode) {
+					console.error("## EL.parseBytes error. Format 1 packet is less than 14 bytes. bytes.length is " + bytes.length);
+					console.error(bytes);
+				}
+				return null;
+			}
+		} else if (bytes[0] === 0x10 && bytes[1] === 0x82) {
+			// フォーマット2: 最小4バイト必要（EHD + 最低限の任意データ）
+			if (bytes.length < 4) {
+				if (EL.debugMode) {
+					console.error("## EL.parseBytes error. Format 2 packet is less than 4 bytes. bytes.length is " + bytes.length);
+					console.error(bytes);
+				}
+				return null;
+			}
+		}
+		// それ以外のEHDの場合は、parseString()でチェックされるので、ここでは最小2バイトだけチェック
 
 		// 数値だったら文字列にして
 		let str = "";
@@ -452,8 +520,12 @@ EL.parseBytes = function (bytes) {
 		// 文字列にしたので，parseStringで何とかする
 		return (EL.parseString(str));
 	} catch (e) {
-		console.error('EL.parseBytes: ', bytes);
-		throw e;
+		if (EL.debugMode) {
+			console.error('EL.parseBytes: ', bytes);
+			console.error(e);
+		}
+		// 例外を投げずにnullを返す
+		return null;
 	}
 };
 
@@ -461,15 +533,48 @@ EL.parseBytes = function (bytes) {
 // 16進数で表現された文字列をいれるとELDATA形式にする
 EL.parseString = function (str) {
 	let eldata = {};
-	if( str.substr(0, 4) == '1082' ) {  // 任意電文形式, arbitrary message format
+
+	// EHD検証: ECHONET Lite仕様に準拠しているかチェック
+	// EHD1 = 0x10 (ECHONET Lite), EHD2 = 0x81 (形式1) または 0x82 (形式2)
+	const ehd = str.substr(0, 4).toLowerCase();
+
+	// EHD1が0x10でない場合は、ECHONET Liteパケットではないので破棄
+	if (ehd.substr(0, 2) !== '10') {
+		if (EL.debugMode) {
+			console.log('EL.parseString: Invalid EHD1. Expected 10, got ' + ehd.substr(0, 2));
+		}
+		return null;
+	}
+
+	// EHD2の検証: 0x81 (形式1) または 0x82 (形式2) のみ有効
+	if (ehd === '1082') {  // 任意電文形式, arbitrary message format
 		eldata = {
 			'EHD': str.substr(0, 4),
 			'AMF': str.substr(4)
 		}
 		return (eldata);
+	} else if (ehd === '1081') {  // 規定電文形式, specified message format
+		// フォーマット1として処理
+	} else {
+		// EHD2が0x81でも0x82でもない場合は破棄
+		if (EL.debugMode) {
+			console.log('EL.parseString: Invalid EHD2. Expected 81 or 82, got ' + ehd.substr(2, 2));
+		}
+		return null;
 	}
 
 	try {
+		// parseDetail()を呼び出す前に、DETAILsを取得
+		let details = EL.parseDetail(str.substr(22, 2), str.substr(24));
+
+		// parseDetail()がnullを返した場合は、パースに失敗したとみなす
+		if (details === null) {
+			if (EL.debugMode) {
+				console.log('EL.parseString: parseDetail returned null');
+			}
+			return null;
+		}
+
 		eldata = {
 			'EHD': str.substr(0, 4),
 			'TID': str.substr(4, 4),
@@ -479,11 +584,15 @@ EL.parseString = function (str) {
 			'ESV': str.substr(20, 2),
 			'OPC': str.substr(22, 2),
 			'DETAIL': str.substr(24),
-			'DETAILs': EL.parseDetail(str.substr(22, 2), str.substr(24))
+			'DETAILs': details
 		};
 	} catch (e) {
-		console.error(str);
-		throw e;
+		// パースエラーの場合はnullを返す（例外を投げない）
+		if (EL.debugMode) {
+			console.error('EL.parseString: Parse error for string:', str);
+			console.error(e);
+		}
+		return null;
 	}
 
 	return (eldata);
